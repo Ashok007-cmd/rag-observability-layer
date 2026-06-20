@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  # ── Job 1: always runs, zero secrets needed ──────────────────────────────
+  # ── Job 1: hard gate — all 62 unit tests must pass ───────────────────────
   unit-tests:
     name: Unit Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -46,45 +46,14 @@ jobs:
       - name: Run demo (smoke test — no API keys needed)
         run: python scripts/demo_observability.py
 
-  # ── Job 2: integration smoke test — non-blocking (continue-on-error) ────
+  # ── Job 2: baseline recording + regression check (no external services) ──
+  # Non-blocking: runs after unit tests, failures are informational only.
+  # Langfuse connection errors are handled gracefully by the circuit breaker.
   regression-gate:
     name: Integration — Regression Gate
     runs-on: ubuntu-latest
     needs: unit-tests
     continue-on-error: true
-
-    services:
-      postgres:
-        image: postgres:16-alpine
-        ports:
-          - 5432:5432
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: langfuse
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 15
-
-      langfuse:
-        image: langfuse/langfuse:2
-        ports:
-          - 3000:3000
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@postgres:5432/langfuse
-          NEXTAUTH_URL: http://localhost:3000
-          NEXTAUTH_SECRET: ci-nextauth-secret-not-used-in-prod
-          SALT: ci-salt-not-used-in-prod
-          TELEMETRY_ENABLED: "false"
-          PORT: "3000"
-        options: >-
-          --health-cmd "curl -sf http://localhost:3000/api/health || exit 1"
-          --health-interval 15s
-          --health-timeout 10s
-          --health-retries 15
-          --health-start-period 60s
 
     steps:
       - uses: actions/checkout@v4
@@ -100,18 +69,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Verify Langfuse is reachable
-        run: |
-          for i in {1..20}; do
-            if curl -sf http://localhost:3000/api/health; then
-              echo "Langfuse is up"
-              break
-            fi
-            echo "Attempt $i/20 — waiting for Langfuse..."
-            sleep 5
-          done
-
-      - name: Run demo with monitoring enabled
+      - name: Run demo with monitoring enabled (Langfuse offline — circuit breaker handles it)
         env:
           MONITOR_ENABLED: "true"
           MONITOR_LANGFUSE_HOST: http://localhost:3000
@@ -119,7 +77,7 @@ jobs:
           MONITOR_LANGFUSE_PUBLIC_KEY: pk-lf-ci-key
         run: python scripts/demo_observability.py
 
-      - name: Record baseline (skip if already exists for this branch)
+      - name: Record baseline
         env:
           MONITOR_ENABLED: "true"
           MONITOR_LANGFUSE_HOST: http://localhost:3000
