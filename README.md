@@ -218,10 +218,6 @@ rag-observability-layer/
 └── .env.example              # Environment variable template
 ```
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, branching strategy, and PR guidelines.
-
 ## License
 
 [MIT](LICENSE)
