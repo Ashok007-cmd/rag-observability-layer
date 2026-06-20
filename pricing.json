@@ -1,0 +1,35 @@
+{
+  "_comment": "Per-token pricing in USD per 1K tokens. Source: provider pricing pages.",
+  "openai": {
+    "gpt-4o-mini": {
+      "input": 0.00015,
+      "output": 0.00060
+    },
+    "gpt-4o": {
+      "input": 0.0025,
+      "output": 0.010
+    }
+  },
+  "anthropic": {
+    "claude-3-haiku-20240307": {
+      "input": 0.00025,
+      "output": 0.00125
+    },
+    "claude-sonnet-4-20250514": {
+      "input": 0.003,
+      "output": 0.015
+    },
+    "claude-haiku-4-5-20251001": {
+      "input": 0.0008,
+      "output": 0.004
+    },
+    "claude-sonnet-4-6": {
+      "input": 0.003,
+      "output": 0.015
+    },
+    "claude-opus-4-8": {
+      "input": 0.015,
+      "output": 0.075
+    }
+  }
+}

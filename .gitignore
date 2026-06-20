@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment / secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.log
+
+# IDE / OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Runtime-generated data (non-committed state)
+data/monitoring/baselines.json
+data/monitoring/prompts.json
+data/chroma_db/
+data/eval_results/
+eval-summary.json
+monitoring-summary.json
+PROJECT_ANALYSIS_AND_GITHUB_READINESS.md
+
+# Docker volumes (never track)
+infra/postgres_data/
+infra/prometheus_data/
+infra/grafana_data/
+
+# Temporary files
+*.tmp
+*.bak
