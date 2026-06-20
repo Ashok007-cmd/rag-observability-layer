@@ -51,7 +51,6 @@ jobs:
     name: Integration — Regression Gate
     runs-on: ubuntu-latest
     needs: unit-tests
-    if: ${{ secrets.OPENAI_API_KEY != '' }}
 
     services:
       postgres:
