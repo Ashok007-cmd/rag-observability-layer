@@ -2,6 +2,7 @@
 
 > Production-grade monitoring, tracing, and CI regression-gating for LLM-based RAG pipelines.
 
+[![Release](https://img.shields.io/github/v/release/Ashok007-cmd/rag-observability-layer)](https://github.com/Ashok007-cmd/rag-observability-layer/releases/latest)
 [![Tests](https://github.com/Ashok007-cmd/rag-observability-layer/actions/workflows/monitor.yml/badge.svg)](https://github.com/Ashok007-cmd/rag-observability-layer/actions/workflows/monitor.yml)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
