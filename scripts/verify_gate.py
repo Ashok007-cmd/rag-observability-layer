@@ -7,14 +7,14 @@ records a baseline, and validates regression detection.
 
 from __future__ import annotations
 
-import os
-import sys
 import json
-import shutil
 import logging
+import os
+import shutil
+import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 from types import SimpleNamespace
+from unittest.mock import patch
 
 # Setup paths
 project3_dir = Path(__file__).parent.parent
@@ -40,17 +40,16 @@ sys.path.insert(0, str(project3_dir / "scripts"))
 sys.path.insert(0, str(project1_dir / "scripts"))
 
 # Redirect src.monitoring imports to our premium package
-import monitoring
+
 sys.modules["src.monitoring"] = sys.modules["monitoring"]
-import monitoring.metrics
+
 sys.modules["src.monitoring.metrics"] = sys.modules["monitoring.metrics"]
-import monitoring.tracing
+
 sys.modules["src.monitoring.tracing"] = sys.modules["monitoring.tracing"]
-import monitoring.wrappers
+
 sys.modules["src.monitoring.wrappers"] = sys.modules["monitoring.wrappers"]
-import monitoring.prompts
+
 sys.modules["src.monitoring.prompts"] = sys.modules["monitoring.prompts"]
-import monitoring.config
 sys.modules["src.monitoring.config"] = sys.modules["monitoring.config"]
 
 # Enable monitoring
@@ -105,7 +104,7 @@ def test_full_pipeline(mock_openai_create):
     eval_summary = Path("eval-summary.json")
     mon_summary = Path("monitoring-summary.json")
     baseline_dir = project3_dir / "data" / "monitoring"
-    
+
     if eval_summary.exists():
         eval_summary.unlink()
     if mon_summary.exists():
@@ -115,7 +114,7 @@ def test_full_pipeline(mock_openai_create):
 
     print(">>> Phase 2: Running evaluate.py with monitoring enabled...")
     import evaluate
-    
+
     # Run evaluation
     sys.argv = ["evaluate.py", "--hybrid", "--reranker", "--export-ci-summary"]
     evaluate.main()
@@ -127,7 +126,7 @@ def test_full_pipeline(mock_openai_create):
     # Assert evaluation and monitoring summaries are generated
     assert eval_summary.exists(), "eval-summary.json was not created!"
     assert mon_summary.exists(), "monitoring-summary.json was not created!"
-    
+
     with open(eval_summary) as f:
         eval_data = json.load(f)
     print(f"Evaluation summary content: {eval_data}")
@@ -144,7 +143,7 @@ def test_full_pipeline(mock_openai_create):
     prompts_path = baseline_dir / "prompts.json"
     assert prompts_path.exists(), "prompts.json was not created!"
     with open(prompts_path) as f:
-        prompts_data = json.load(f)
+        json.load(f)
     print("Prompts registry generated successfully.")
 
     print("\n>>> Phase 3: Recording baseline for branch 'main'...")

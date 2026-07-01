@@ -7,10 +7,45 @@ on:
     branches: [main]
 
 jobs:
-  # ── Job 1: hard gate — all 62 unit tests must pass ───────────────────────
+  # ── Job 0: lint, type-check, dependency vulnerability scan ────────────────
+  lint-and-security:
+    name: Lint, Type Check & Dependency Audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff mypy pip-audit
+
+      - name: Ruff lint
+        run: ruff check monitoring scripts
+
+      - name: Mypy type check
+        run: mypy monitoring
+        continue-on-error: true
+
+      - name: pip-audit dependency scan
+        run: pip-audit -r requirements.txt
+        continue-on-error: true
+
+  # ── Job 1: hard gate — the full unit test suite must pass ────────────────
   unit-tests:
     name: Unit Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -54,6 +89,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit-tests
     continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
       - uses: actions/checkout@v4

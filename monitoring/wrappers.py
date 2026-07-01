@@ -1,27 +1,23 @@
 from __future__ import annotations
 
-import logging
-import time
 import contextlib
+import contextvars
+import logging
+import threading
+import time
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Generator, Iterator
+from typing import Any
 
-from .tracing import Tracer
 from .config import settings
 from .extensions import (
     BaseExtension,
     LangfuseTracingExtension,
     OTelMetricsExtension,
-    GuardrailExtension,
 )
+from .tracing import Tracer
 
 logger = logging.getLogger(__name__)
-
-from .metrics import MetricsCollector
-
-
-
-import contextvars
 
 # Global ContextVar to store active usage_dict for the current context/thread
 active_usage_var: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar("active_usage", default=None)
@@ -32,12 +28,12 @@ _patched_anthropic_func = None
 
 def _globally_patch_clients():
     global _patched_openai_func, _patched_anthropic_func
-    
+
     # Patch OpenAI
     try:
         import openai
         orig_openai_create = openai.resources.chat.completions.Completions.create
-        
+
         def patched_openai_create(self_obj, *args, **kwargs):
             res = orig_openai_create(self_obj, *args, **kwargs)
             try:
@@ -49,7 +45,7 @@ def _globally_patch_clients():
             except Exception as e:
                 logger.warning("Failed to extract OpenAI token usage: %s", e)
             return res
-            
+
         openai.resources.chat.completions.Completions.create = patched_openai_create
         _patched_openai_func = patched_openai_create
     except (ImportError, AttributeError):
@@ -59,7 +55,7 @@ def _globally_patch_clients():
     try:
         import anthropic
         orig_anthropic_create = anthropic.resources.messages.Messages.create
-        
+
         def patched_anthropic_create(self_obj, *args, **kwargs):
             res = orig_anthropic_create(self_obj, *args, **kwargs)
             try:
@@ -71,7 +67,7 @@ def _globally_patch_clients():
             except Exception as e:
                 logger.warning("Failed to extract Anthropic token usage: %s", e)
             return res
-            
+
         anthropic.resources.messages.Messages.create = patched_anthropic_create
         _patched_anthropic_func = patched_anthropic_create
     except (ImportError, AttributeError):
@@ -90,7 +86,16 @@ def _get_default_system_prompt() -> str:
         return ""
 
 
-import threading
+def _render_prompt(template: str, context: str) -> str:
+    """Substitute {context} into a prompt template via literal replace.
+
+    Deliberately not str.format(): a template/system_prompt that ever
+    carries external input would expose Python's format-spec mini-language
+    (attribute/index traversal, e.g. {context.__class__...}) to that input.
+    A plain literal replace has no such surface.
+    """
+    return template.replace("{context}", context)
+
 
 _active_patches_lock = threading.Lock()
 _active_patches_count = 0
@@ -102,14 +107,15 @@ _dynamic_anthropic_patch_active = False
 
 @contextlib.contextmanager
 def intercept_token_usage(usage_dict: dict[str, int]):
-    global _active_patches_count, _original_openai_create, _original_anthropic_create, _dynamic_openai_patch_active, _dynamic_anthropic_patch_active
+    global _active_patches_count, _original_openai_create, _original_anthropic_create
+    global _dynamic_openai_patch_active, _dynamic_anthropic_patch_active
 
     usage_dict["prompt_tokens"] = 0
     usage_dict["completion_tokens"] = 0
     usage_dict["total_tokens"] = 0
 
     token = active_usage_var.set(usage_dict)
-    
+
     with _active_patches_lock:
         if _active_patches_count == 0:
             # Check OpenAI
@@ -119,7 +125,7 @@ def intercept_token_usage(usage_dict: dict[str, int]):
                 if current_openai is not _patched_openai_func:
                     _dynamic_openai_patch_active = True
                     _original_openai_create = current_openai
-                    
+
                     def temp_openai_create(self_obj, *args, **kwargs):
                         res = _original_openai_create(self_obj, *args, **kwargs)
                         try:
@@ -142,7 +148,7 @@ def intercept_token_usage(usage_dict: dict[str, int]):
                 if current_anthropic is not _patched_anthropic_func:
                     _dynamic_anthropic_patch_active = True
                     _original_anthropic_create = current_anthropic
-                    
+
                     def temp_anthropic_create(self_obj, *args, **kwargs):
                         res = _original_anthropic_create(self_obj, *args, **kwargs)
                         try:
@@ -157,7 +163,7 @@ def intercept_token_usage(usage_dict: dict[str, int]):
                     anthropic.resources.messages.Messages.create = temp_anthropic_create
             except (ImportError, AttributeError):
                 pass
-                
+
         _active_patches_count += 1
 
     try:
@@ -229,6 +235,17 @@ class MonitoredRAGPipeline:
 
         self._instrument_pipeline()
 
+    def _current_trace_id(self) -> str | None:
+        """Active Langfuse trace ID, or None if tracing is disabled.
+
+        Guarded on `enabled` because Tracer.get_trace_id() lazily *generates*
+        a fresh id on first call — calling it while tracing is off would
+        fabricate an id that's never attached to any real Langfuse trace.
+        """
+        if not self._tracer.enabled:
+            return None
+        return self._tracer.get_trace_id()
+
     def _run_hook(self, ext_method_name: str, *args: Any, **kwargs: Any) -> None:
         for ext in self.extensions:
             hook = getattr(ext, ext_method_name, None)
@@ -255,11 +272,11 @@ class MonitoredRAGPipeline:
 
         # 1. Wrap _retrieve
         original_retrieve = self._pipeline._retrieve
-        
+
         def monitored_retrieve(query: str, use_hybrid: bool = False, use_reranker: bool = False, k: int = 5, lang: str = "en"):
             start_time = time.monotonic()
             input_data = {"query": query, "use_hybrid": use_hybrid, "use_reranker": use_reranker, "k": k, "lang": lang}
-            
+
             self._run_hook("on_step_start", "retrieve", input_data, {})
 
             import inspect
@@ -277,9 +294,9 @@ class MonitoredRAGPipeline:
             try:
                 contexts = original_retrieve(query, **kwargs)
             except Exception as exc:
-                self._run_hook("on_step_error", "retrieve", exc)
+                self._run_hook("on_step_error", "retrieve", exc, trace_id=self._current_trace_id())
                 raise
-            
+
             elapsed = time.monotonic() - start_time
             chunk_ids = [ctx.get("id") for ctx in contexts]
             retrieved_metadata = []
@@ -293,14 +310,14 @@ class MonitoredRAGPipeline:
                     "title": title,
                     "score": ctx.get("score")
                 })
-            
+
             output_val = {"chunk_ids": chunk_ids, "chunks": retrieved_metadata}
-            
+
             self._run_hook("on_step_end", "retrieve", output_val, elapsed, metadata={"chunk_ids": chunk_ids, "chunks": retrieved_metadata})
 
-            
+
             return contexts
-        
+
         self._pipeline._retrieve = monitored_retrieve
 
         # 2. Wrap _apply_reranker
@@ -310,13 +327,13 @@ class MonitoredRAGPipeline:
             def monitored_rerank(query: str, contexts: list[dict[str, Any]], top_k: int = 5):
                 start_time = time.monotonic()
                 input_data = {"query": query, "contexts_count": len(contexts), "top_k": top_k}
-                
+
                 self._run_hook("on_step_start", "rerank", input_data, {})
 
                 try:
                     reranked = original_rerank(query, contexts, top_k=top_k)
                 except Exception as exc:
-                    self._run_hook("on_step_error", "rerank", exc)
+                    self._run_hook("on_step_error", "rerank", exc, trace_id=self._current_trace_id())
                     raise
 
                 elapsed = time.monotonic() - start_time
@@ -344,33 +361,33 @@ class MonitoredRAGPipeline:
 
         # 3. Wrap generator.generate
         original_generate = self._pipeline.generator.generate
-        
+
         def monitored_generate(query: str, contexts: list[dict[str, Any]], system_prompt: str | None = None) -> str:
             start_time = time.monotonic()
-            
+
             DEFAULT_SYSTEM_PROMPT = _get_default_system_prompt()
-            
+
             formatted_context = ""
             if hasattr(self._pipeline.generator, "_format_context"):
                 formatted_context = self._pipeline.generator._format_context(contexts)
-            prompt_content = (system_prompt or DEFAULT_SYSTEM_PROMPT).format(context=formatted_context)
-            
+            prompt_content = _render_prompt(system_prompt or DEFAULT_SYSTEM_PROMPT, formatted_context)
+
             input_data = {"query": query, "contexts_count": len(contexts)}
             self._run_hook("on_step_start", "generate", input_data, {})
 
             usage_dict = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-            
+
             try:
                 with intercept_token_usage(usage_dict):
                     answer = original_generate(query, contexts, system_prompt=system_prompt)
             except Exception as exc:
-                self._run_hook("on_step_error", "generate", exc)
+                self._run_hook("on_step_error", "generate", exc, trace_id=self._current_trace_id())
                 raise
-            
+
             elapsed = time.monotonic() - start_time
             provider = getattr(self._pipeline.generator, "provider", "openai")
             model = getattr(self._pipeline.generator, "model", "gpt-4o-mini")
-            
+
             cost = self._tracer._pricing.get_cost(
                 provider,
                 model,
@@ -413,7 +430,7 @@ class MonitoredRAGPipeline:
 
     def ingest(self, source: Path | str) -> int:
         self._run_hook("on_step_start", "ingest", {"source": str(source)}, {})
-                
+
         start_time = time.monotonic()
         try:
             res = self._pipeline.ingest(source)
@@ -421,7 +438,7 @@ class MonitoredRAGPipeline:
             self._run_hook("on_step_end", "ingest", {"chunks_ingested": res}, elapsed)
             return res
         except Exception as exc:
-            self._run_hook("on_step_error", "ingest", exc)
+            self._run_hook("on_step_error", "ingest", exc, trace_id=self._current_trace_id())
             raise
 
 
@@ -438,7 +455,7 @@ class MonitoredRAGPipeline:
             "reranker": use_reranker,
             "top_k": top_k,
         }
-        
+
         self._last_query_tokens = {"prompt": 0, "completion": 0, "total": 0}
         self._last_query_cost = 0.0
 
@@ -453,7 +470,7 @@ class MonitoredRAGPipeline:
                 use_reranker=use_reranker,
             )
         except Exception as exc:
-            self._run_hook("on_query_error", exc)
+            self._run_hook("on_query_error", exc, trace_id=self._current_trace_id())
             raise
 
         elapsed = time.monotonic() - start
@@ -479,7 +496,7 @@ class MonitoredRAGPipeline:
         use_reranker: bool = False,
     ) -> Generator[str, None, None]:
         """Runs a monitored RAG query, yielding token chunks in real-time.
-        
+
         Measures Time-to-First-Token (TTFT) and throughput metrics.
         """
         start = time.monotonic()
@@ -507,7 +524,7 @@ class MonitoredRAGPipeline:
                 contexts = self._pipeline._apply_reranker(question, contexts, top_k=k)
             citations = self._pipeline.citation_formatter.build_citations(contexts)
         except Exception as exc:
-            self._run_hook("on_query_error", exc)
+            self._run_hook("on_query_error", exc, trace_id=self._current_trace_id())
             raise
 
         def count_tokens(text: str, model: str = "gpt-4") -> int:
@@ -525,19 +542,19 @@ class MonitoredRAGPipeline:
         def on_completion(answer: str, elapsed: float):
             provider = getattr(self._pipeline.generator, "provider", "openai")
             model = getattr(self._pipeline.generator, "model", "gpt-4o-mini")
-            
+
             formatted_context = ""
             if hasattr(self._pipeline.generator, "_format_context"):
                 formatted_context = self._pipeline.generator._format_context(contexts)
-            
+
             DEFAULT_SYSTEM_PROMPT = _get_default_system_prompt()
-            
-            prompt_content = DEFAULT_SYSTEM_PROMPT.format(context=formatted_context)
+
+            prompt_content = _render_prompt(DEFAULT_SYSTEM_PROMPT, formatted_context)
             prompt_tokens = count_tokens(prompt_content + "\n" + question, model)
             completion_tokens = count_tokens(answer, model)
             total_tokens = prompt_tokens + completion_tokens
             cost = self._tracer._pricing.get_cost(provider, model, prompt_tokens, completion_tokens)
-            
+
             tokens_dict = {"prompt": prompt_tokens, "completion": completion_tokens, "total": total_tokens}
             self._last_query_tokens = tokens_dict
             self._last_query_cost = cost
@@ -545,21 +562,23 @@ class MonitoredRAGPipeline:
             self._run_hook("on_query_end", answer, citations, elapsed, tokens_dict, cost)
 
         def on_error(exc: Exception):
-            self._run_hook("on_query_error", exc)
+            self._run_hook("on_query_error", exc, trace_id=self._current_trace_id())
 
 
         # Dynamic stream method definition
-        def dynamic_generate_stream(self_gen, q: str, ctxs: list[dict[str, Any]], sys_prompt: str | None = None) -> Generator[str, None, None]:
+        def dynamic_generate_stream(
+            self_gen, q: str, ctxs: list[dict[str, Any]], sys_prompt: str | None = None
+        ) -> Generator[str, None, None]:
             DEFAULT_SYSTEM_PROMPT = _get_default_system_prompt()
-            
+
             fmt_context = ""
             if hasattr(self_gen, "_format_context"):
                 fmt_context = self_gen._format_context(ctxs)
-            prompt_content = (sys_prompt or DEFAULT_SYSTEM_PROMPT).format(context=fmt_context)
-            
+            prompt_content = _render_prompt(sys_prompt or DEFAULT_SYSTEM_PROMPT, fmt_context)
+
             prov = getattr(self_gen, "provider", "openai")
             mdl = getattr(self_gen, "model", "gpt-4o-mini")
-            
+
             if prov == "openai":
                 from openai import OpenAI
                 client = OpenAI(timeout=60.0)
@@ -586,13 +605,12 @@ class MonitoredRAGPipeline:
                     system=prompt_content,
                     messages=[{"role": "user", "content": q}],
                 ) as stream:
-                    for text in stream.text_stream:
-                        yield text
+                    yield from stream.text_stream
             else:
                 # Simulated stream fallback
                 try:
                     ans = self_gen.generate(q, ctxs, system_prompt=sys_prompt)
-                except Exception as e:
+                except Exception:
                     ans = "Fallback generated output stream simulation."
                 for word in ans.split(" "):
                     yield word + " "
@@ -604,7 +622,7 @@ class MonitoredRAGPipeline:
                 )
             raw_stream = self._pipeline.generator.generate_stream(question, contexts)
         except Exception as exc:
-            self._run_hook("on_query_error", exc)
+            self._run_hook("on_query_error", exc, trace_id=self._current_trace_id())
             raise
 
         self._run_hook("on_step_start", "generate", {"query": question, "contexts_count": len(contexts)}, {})
@@ -613,7 +631,7 @@ class MonitoredRAGPipeline:
             start_gen = time.monotonic()
             accumulated_text = []
             first_token_time = None
-            
+
             try:
                 for chunk in raw_stream:
                     if first_token_time is None and chunk:
@@ -622,16 +640,16 @@ class MonitoredRAGPipeline:
                         on_first_token(ttft)
                     accumulated_text.append(chunk)
                     yield chunk
-                
+
                 elapsed_gen = time.monotonic() - start_gen
                 answer = "".join(accumulated_text)
-                
+
                 provider = getattr(self._pipeline.generator, "provider", "openai")
                 model = getattr(self._pipeline.generator, "model", "gpt-4o-mini")
                 prompt_tokens = count_tokens(question, model)
                 completion_tokens = count_tokens(answer, model)
                 cost = self._tracer._pricing.get_cost(provider, model, prompt_tokens, completion_tokens)
-                
+
                 self._run_hook(
                     "on_generation_llm_call",
                     model=model,
@@ -639,15 +657,19 @@ class MonitoredRAGPipeline:
                     prompt=question,
                     query=question,
                     response=answer,
-                    usage={"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": prompt_tokens + completion_tokens},
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
                     cost=cost,
                 )
                 self._run_hook("on_step_end", "generate", {"answer": answer}, elapsed_gen)
-                
+
                 on_completion(answer, time.monotonic() - start)
-                
+
             except Exception as exc:
-                self._run_hook("on_step_error", "generate", exc)
+                self._run_hook("on_step_error", "generate", exc, trace_id=self._current_trace_id())
                 on_error(exc)
                 raise
 
@@ -663,6 +685,6 @@ class MonitoredRAGPipeline:
             self._pipeline.reset()
             self._run_hook("on_step_end", "reset", {}, time.monotonic() - start)
         except Exception as exc:
-            self._run_hook("on_step_error", "reset", exc)
+            self._run_hook("on_step_error", "reset", exc, trace_id=self._current_trace_id())
             raise
 

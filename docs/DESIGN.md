@@ -1,8 +1,8 @@
-# Monitoring & Observability Layer — SPEC
+# Monitoring & Observability Layer — Design
 
 ## 1. Overview
 
-This project adds a production-grade monitoring and observability layer to the RAG pipeline from Project 1. It covers three phases: Langfuse-based tracing of every pipeline step, OpenTelemetry metrics for production observability, and CI regression gating for latency/cost/quality.
+This package adds a production-grade monitoring and observability layer around any RAG pipeline. It covers three concerns: Langfuse-based tracing of every pipeline step, OpenTelemetry metrics for production observability, and CI regression gating for latency/cost/quality.
 
 **Success criteria:**
 - Every RAG pipeline step is traced with prompts, retrieved chunks, and token usage visible in Langfuse
@@ -14,22 +14,22 @@ This project adds a production-grade monitoring and observability layer to the R
 
 ```
 ┌──────────────────────────────────────────────┐
-│              monitoring/ package              │
+│              monitoring/ package               │
 │  ┌────────────────────┐ ┌──────────────────┐  │
-│  │  Tracing Layer     │ │  Metrics Layer   │  │
-│  │  (Langfuse SDK)    │ │  (OTel + Prom)   │  │
-│  └────────┬───────────┘ └────────┬─────────┘  │
+│  │  Tracing Layer      │ │  Metrics Layer   │  │
+│  │  (Langfuse SDK)     │ │  (OTel + Prom)   │  │
+│  └────────┬─────────────┘ └────────┬─────────┘  │
 └───────────┼──────────────────────┼────────────┘
             │                      │
 ┌───────────┼──────────────────────┼────────────┐
-│  RAG Pipeline (Project 1)       │            │
-│  ┌──────┐ ┌──────┐ ┌──────┐     │            │
-│  │Load  │ │Chunk │ │Embed │     │            │
-│  └──┬───┘ └──┬───┘ └──┬───┘     │            │
-│     │        │        │         │            │
-│  ┌──▼───┐ ┌──▼───┐ ┌──▼───┐    │            │
-│  │Retr. │ │Rerank│ │Gen.  │    │            │
-│  └──────┘ └──────┘ └──────┘    │            │
+│  Your RAG Pipeline                │            │
+│  ┌──────┐ ┌──────┐ ┌──────┐      │            │
+│  │Load  │ │Chunk │ │Embed │      │            │
+│  └──┬───┘ └──┬───┘ └──┬───┘      │            │
+│     │        │        │          │            │
+│  ┌──▼───┐ ┌──▼───┐ ┌──▼───┐     │            │
+│  │Retr. │ │Rerank│ │Gen.  │     │            │
+│  └──────┘ └──────┘ └──────┘     │            │
 └────────────────────────────────┼────────────┘
                                  │
                     ┌────────────▼────────────┐
@@ -75,8 +75,8 @@ mc.record_latency(step, seconds)                   # records to histogram
 mc.record_error(step, error_type)                  # increments error counter
 mc.record_query_count()                            # increments query counter
 mc.record_context_count(n)                         # records to context histogram
-mc.record_cost(cost)                               # records to cost histogram
-mc.record_tokens(prompt, completion, total)        # records to token histograms
+mc.record_cost(cost)                                # records to cost histogram
+mc.record_tokens(prompt, completion, total)         # records to token histograms
 ```
 
 ### monitoring.wrappers
@@ -92,12 +92,12 @@ monitored.ingest(source) -> int
 ```python
 PromptRegistry(persist_path)                       # version-controlled prompt store
 registry.register(name, prompt, metadata) -> hash  # stores version, returns SHA256
-registry.current_hash(name) -> str | None          # latest hash for prompt
-registry.detect_change(name, new_prompt) -> bool   # True if hash differs
+registry.current_hash(name) -> str | None           # latest hash for prompt
+registry.detect_change(name, new_prompt) -> bool    # True if hash differs
 registry.get_versions(name) -> list[PromptVersion]  # full version history
 ```
 
-## 4. Phase 1: Instrumentation
+## 4. Instrumentation
 
 ### Tracing design
 
@@ -118,7 +118,7 @@ query (root span)
 - Per-request cost = `(prompt_tokens * input_price) + (completion_tokens * output_price)`
 - Costs are logged on Langfuse spans and recorded in OTel histograms
 
-## 5. Phase 2: Production Metrics
+## 5. Production Metrics
 
 ### OpenTelemetry metric definitions
 
@@ -136,7 +136,7 @@ query (root span)
 
 Model → cost mappings are stored in `pricing.json`, loaded by `PricingConfig`. Adding a new model is a data change, not a code change.
 
-## 6. Phase 3: CI Regression Gating
+## 6. CI Regression Gating
 
 ### Baseline schema
 
@@ -160,13 +160,12 @@ Model → cost mappings are stored in `pricing.json`, loaded by `PricingConfig`.
 
 ### CI workflow steps
 
-1. Spin up Langfuse + PostgreSQL via Docker service containers (memory-limited to 1G)
-2. Install monitoring package and RAG pipeline
-3. Ingest sample documents
+1. Lint (`ruff`), type-check (`mypy`), and dependency-audit (`pip-audit`) the package
+2. Install monitoring package and run the unit test suite
+3. Run the demo/evaluation flow with monitoring enabled
 4. Record baseline for branch if none exists
-5. Run evaluation with monitoring enabled
-6. Check regressions against baseline (fail if any metric degrades >20%)
-7. Upload artifacts and post PR comment
+5. Check regressions against baseline (fail if any metric degrades >20%)
+6. Upload artifacts and post a PR comment
 
 ### Prompt change detection
 
@@ -176,53 +175,28 @@ The `PromptRegistry` computes SHA256 hashes of rendered prompt templates. When a
 
 ### Docker Compose services
 
-| Service | Image | Port | Memory Limit |
-|---------|-------|------|-------------|
-| `postgres` | postgres:16-alpine | 5432 | 1G |
-| `langfuse` | langfuse/langfuse:latest | 3000 | 512M |
-| `prometheus` | prom/prometheus:latest | 9090 | — |
-| `grafana` | grafana/grafana:latest | 3001 | — |
+| Service | Image | Host Port | Memory Limit |
+|---------|-------|-----------|---------------|
+| `postgres` | postgres:16-alpine | *(internal only)* | 1G |
+| `langfuse` | langfuse/langfuse:3 | 127.0.0.1:3000 | 512M |
+| `otel-collector` | otel/opentelemetry-collector-contrib:0.154.0 | 127.0.0.1:4317/4318/8889 | 256M |
+| `prometheus` | prom/prometheus:v2.53.5 | 127.0.0.1:9090 | 512M |
+| `grafana` | grafana/grafana:13.1.0 | 127.0.0.1:3001 | 512M |
 
-One-command local stack: `scripts/start_monitoring_stack.sh`
+Images are version-pinned (no `:latest`) for reproducibility, and dev-only ports are bound to `127.0.0.1` rather than `0.0.0.0`. One-command local stack: `scripts/start_monitoring_stack.sh`.
 
 ## 8. Configuration
 
-All config via environment variables with `MONITOR_` prefix:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MONITOR_ENABLED` | `true` | Master toggle for all monitoring |
-| `MONITOR_LANGFUSE_SECRET_KEY` | `""` | Langfuse API secret |
-| `MONITOR_LANGFUSE_PUBLIC_KEY` | `""` | Langfuse API public key |
-| `MONITOR_LANGFUSE_HOST` | `http://localhost:3000` | Langfuse instance URL |
-| `MONITOR_LANGFUSE_RELEASE` | `dev` | Release/branch identifier |
-| `MONITOR_OTEL_SERVICE_NAME` | `rag-pipeline` | OTel service name |
-| `MONITOR_OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTel collector endpoint |
-| `MONITOR_PRICING_FILE` | `pricing.json` | Path to pricing data |
-| `MONITOR_BASELINE_DIR` | `data/monitoring` | CI baseline storage |
+All config via environment variables with `MONITOR_` prefix — see the [README configuration table](../README.md#configuration) for the current, authoritative list.
 
 ## 9. Testing Strategy
 
 | Module | Test approach | Key scenarios |
 |--------|--------------|---------------|
-| `config.py` | Unit tests with real pricing.json | Cost calculation for known/unknown models |
+| `config.py` | Unit tests with real pricing.json | Cost calculation for known/unknown models, key-prefix rejection |
 | `tracing.py` | Unit tests with mocked Langfuse | Span creation, generation capture, error propagation |
 | `wrappers.py` | Unit tests with mocked pipeline | Query delegation, latency recording, error recording |
 | `metrics.py` | Unit tests with mocked OTel | Histogram/counter recording, noop when disabled |
 | `prompts.py` | Unit tests with in-memory registry | Registration, change detection, version history |
 | `check_regressions.py` | Unit tests with synthetic baselines | Pass/fail on each metric, threshold enforcement |
 | Integration | `evaluate.py` with monitoring enabled | End-to-end: trace + metrics + CI output |
-
-## 10. Implementation Order
-
-```
-Task 1: Config + pricing + scaffold         (foundation, no deps)
-Task 2: Langfuse Tracer                      (depends on Task 1)
-Task 3: MonitoredRAGPipeline wrapper         (depends on Task 1, 2)
-Task 4: PromptRegistry                       (depends on Task 1)
-Task 5: OTel MetricsCollector                (depends on Task 1)
-Task 6: Wire metrics into wrapper            (depends on Task 3, 5)
-Task 7: Regression scripts                   (depends on Task 1, 4)
-Task 8: CI workflow                          (depends on Task 7)
-Task 9: Docker Compose + Grafana             (independent)
-```

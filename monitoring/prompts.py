@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +45,7 @@ class PromptRegistry:
             hash=prompt_hash,
             prompt=prompt,
             name=name,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             metadata=metadata or {},
         )
         if name not in self._versions:

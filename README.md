@@ -14,7 +14,9 @@ This package wraps any RAG pipeline with a non-invasive observability layer that
 - **OpenTelemetry metrics** — step latency histograms, error counters, query volume, context chunk distribution, and cost histograms exported to Prometheus/Grafana
 - **Pluggable extension hooks** — clean lifecycle callbacks (`on_query_start`, `on_step_end`, `on_generation_llm_call`, …) to wire custom logic without modifying core code
 - **Telemetry circuit breaker** — automatically bypasses tracing/metrics when the collector is down so pipeline latency is never degraded
-- **Real-time guardrails** — keyword-based input/output filtering that raises immediately to block harmful or confidential content
+- **Basic keyword guardrails** — case-insensitive, whole-word input/output filtering that raises immediately when a configured term appears; a lightweight safety net, not a substitute for a real content-safety/PII model
+- **Cost budget alerting** — per-query and cumulative daily cost thresholds that fire a callback (Slack, PagerDuty, …) without blocking already-completed requests
+- **Retrieval quality metrics** — precision@k, MRR, and hit-rate against a ground-truth relevant-chunk set, for eval harnesses that have judged relevance
 - **CI regression gating** — baseline recording and automated threshold checks (latency, cost, faithfulness) that fail the build on degradation
 
 ## Architecture
@@ -27,7 +29,8 @@ MonitoredRAGPipeline          ← thin wrapper, zero-copy delegation
   ├── Extensions (hooks)
   │     ├── LangfuseTracingExtension  → Langfuse UI   (traces)
   │     ├── OTelMetricsExtension      → Prometheus     (metrics)
-  │     └── GuardrailExtension        → raises ValueError
+  │     ├── GuardrailExtension        → raises ValueError
+  │     └── CostBudgetExtension       → alert callback (non-blocking)
   │
   └── RAGPipeline (your existing pipeline)
         ├── _retrieve()    ← instrumented in-place
@@ -36,6 +39,8 @@ MonitoredRAGPipeline          ← thin wrapper, zero-copy delegation
 ```
 
 **Data flow:** each pipeline step fires `on_step_start` / `on_step_end` hooks → the Langfuse extension creates a nested span, the OTel extension records a latency histogram point. Token usage is intercepted transparently from OpenAI / Anthropic clients via a thread-safe `ContextVar` patch.
+
+> **Note on token interception:** importing `monitoring.wrappers` monkeypatches `openai.resources.chat.completions.Completions.create` and `anthropic.resources.messages.Messages.create` process-wide, for as long as the process is alive — not just for calls made through `MonitoredRAGPipeline`. If your process shares these clients with other libraries, they'll see wrapped `create()` calls too. This is required to capture token usage transparently without changing your pipeline's call sites; if that blast radius is a problem for your deployment, isolate the monitored pipeline in its own process.
 
 ## Installation
 
@@ -70,6 +75,20 @@ answer, citations = monitored.query("How does RAG work?", use_reranker=True)
 # Streaming query — measures time-to-first-token
 for chunk in monitored.query_stream("Explain embeddings."):
     print(chunk, end="", flush=True)
+```
+
+### Cost budget alerting
+
+```python
+from monitoring import CostBudgetExtension
+
+def page_oncall(scope: str, actual: float, limit: float) -> None:
+    slack_client.post(f"RAG cost budget exceeded ({scope}): ${actual:.4f} > ${limit:.4f}")
+
+monitored = MonitoredRAGPipeline(
+    pipeline=your_rag_pipeline,
+    extensions=[CostBudgetExtension(per_query_limit=0.05, daily_limit=50.0, on_budget_exceeded=page_oncall)],
+)
 ```
 
 ### Custom extension
@@ -133,12 +152,15 @@ python scripts/verify_infra.py
 | `rag_rerank_latency_seconds` | Histogram | — | Re-ranker latency |
 | `rag_generate_latency_seconds` | Histogram | — | LLM generation latency |
 | `rag_query_total_latency_seconds` | Histogram | — | End-to-end query latency |
-| `rag_{step}_errors_total` | Counter | `error_type` | Errors per step |
+| `rag_{step}_errors_total` | Counter | `error_type`, `trace_id` | Errors per step; `trace_id` links straight to the failing trace in Langfuse (attached only on errors — not on every request — to avoid blowing up metric cardinality) |
 | `rag_queries_total` | Counter | — | Total query volume |
 | `rag_context_chunks_per_query` | Histogram | — | Retrieved chunk count distribution |
 | `rag_cost_per_query_dollars` | Histogram | — | USD cost per query |
 | `rag_tokens_{prompt\|completion\|total}` | Histogram | — | Token usage distribution |
 | `rag_time_to_first_token_seconds` | Histogram | — | Streaming TTFT |
+| `rag_retrieval_precision_at_k` | Histogram | — | Precision@k against a ground-truth relevant-chunk set (call `record_retrieval_quality()` from an eval harness) |
+| `rag_retrieval_reciprocal_rank` | Histogram | — | Reciprocal rank of the first relevant chunk; averaged over queries this is MRR |
+| `rag_retrieval_hit` | Histogram | — | 1 if any retrieved chunk was relevant, else 0; averaged over queries this is hit-rate |
 
 ## CI Regression Gating
 
@@ -177,7 +199,7 @@ The `PricingConfig` class picks up file changes automatically via mtime-based ca
 pytest tests/ -v --cov=monitoring --cov=scripts --cov-report=term-missing
 ```
 
-62 tests, ~75% coverage. All tests are self-contained — no external services required.
+94 tests, ~82% coverage. All tests are self-contained — no external services required.
 
 ## Demo
 
@@ -186,6 +208,12 @@ Run an end-to-end demo using mock pipeline and generators (no API keys needed):
 ```bash
 python scripts/demo_observability.py
 ```
+
+For the full experience — traces in the Langfuse UI and live dashboards in Grafana — bring up the [local observability stack](#local-observability-stack), run the demo (or your own pipeline) against it, then open:
+- `http://localhost:3000` for the Langfuse trace timeline (nested `retrieve` → `rerank` → `generate` spans with cost/token annotations)
+- `http://localhost:3001` for the Grafana latency/cost/error dashboards (provisioned automatically from `infra/grafana/dashboards/`)
+
+<!-- TODO: replace with an actual screenshot/GIF of the Langfuse trace view and Grafana dashboard once captured locally -->
 
 ## Project Structure
 
@@ -204,7 +232,7 @@ rag-observability-layer/
 │   ├── verify_infra.py       # Health-check the local observability stack
 │   ├── verify_gate.py        # End-to-end integration verification
 │   └── demo_observability.py # Runnable demo with mock pipeline
-├── tests/                    # pytest unit tests (62 tests)
+├── tests/                    # pytest unit tests (94 tests)
 ├── infra/
 │   ├── docker-compose.yml    # Full local stack (Langfuse, OTel, Prometheus, Grafana)
 │   ├── otel-collector/       # OTel Collector config

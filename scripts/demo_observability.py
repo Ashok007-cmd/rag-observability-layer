@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Demo script showing the pluggable, real-time, streaming monitoring capabilities."""
 
-import os
 import sys
 import time
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator, Any
+from typing import Any
 
 # Ensure parent directory is in python path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from monitoring.config import settings
+from monitoring.extensions import BaseExtension, GuardrailExtension, OTelMetricsExtension
 from monitoring.wrappers import MonitoredRAGPipeline
-from monitoring.extensions import BaseExtension, LangfuseTracingExtension, OTelMetricsExtension, GuardrailExtension
 
 
 class DummyLLMGenerator:
@@ -69,7 +68,7 @@ class DummyRAGPipeline:
 
 class ConsoleLoggerExtension(BaseExtension):
     """Custom developer plugin printing real-time event logs to the terminal."""
-    
+
     def on_query_start(self, question: str, metadata: dict[str, Any]) -> None:
         print(f"\n[ConsoleLog] Query Start: '{question}' | Options: {metadata}")
 
@@ -88,10 +87,10 @@ def main():
     print("=" * 70)
     print("REAL-TIME OBSERVABILITY PLATFORM DEMO")
     print("=" * 70)
-    
+
     # 1. Instantiate the mock pipeline
     base_pipeline = DummyRAGPipeline()
-    
+
     # 2. Configure pluggable extensions:
     # We include our ConsoleLoggerExtension, the standard OTel metrics exporter,
     # and a GuardrailExtension blocking restricted keywords.
@@ -100,25 +99,25 @@ def main():
         OTelMetricsExtension(),
         GuardrailExtension(blocked_keywords=["secret_password", "confidential_internal"])
     ]
-    
+
     monitored_pipeline = MonitoredRAGPipeline(
         pipeline=base_pipeline,
         extensions=custom_extensions
     )
-    
+
     # --- SCENARIO 1: Standard Synchronous Blocking Query ---
     print("\n--- Running Scenario 1: Standard Blocking Query ---")
     monitored_pipeline.query("How do I monitor my production RAG pipeline?", use_reranker=True)
-    
+
     # --- SCENARIO 2: Real-time Streaming Query ---
     print("\n--- Running Scenario 2: Real-time Streaming Query ---")
     stream = monitored_pipeline.query_stream("Explain stream logging benefits.", use_hybrid=True)
-    
+
     print("Streaming tokens: ", end="", flush=True)
     for chunk in stream:
         print(chunk, end="", flush=True)
     print()  # final newline
-    
+
     # --- SCENARIO 3: Real-time Guardrail Violation (Blocking) ---
     print("\n--- Running Scenario 3: Guardrail Enforcement ---")
     print("Sending query containing restricted phrase: 'secret_password'")
@@ -126,7 +125,7 @@ def main():
         monitored_pipeline.query("What is the secret_password value?")
     except ValueError as e:
         print(f"\n[GUARDRAIL TRIGGERED SUCCESSFULLY]: {e}")
-        
+
     print("\n" + "=" * 70)
     print("Demo completed successfully. All components operational.")
     print("=" * 70)

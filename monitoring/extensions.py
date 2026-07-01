@@ -1,23 +1,24 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
-import time
 import queue
 import threading
-import concurrent.futures
-from typing import Any, Dict, List, Optional
-from pathlib import Path
+import time
+from collections.abc import Callable
+from datetime import date
+from typing import Any
 
-from .config import settings, PricingConfig
-from .tracing import Tracer
+from .config import settings
 from .metrics import MetricsCollector
+from .tracing import Tracer
 
 logger = logging.getLogger(__name__)
 
 
 class CircuitBreaker:
     """Sliding-window circuit breaker for telemetry backends.
-    
+
     Prevents downstream outages (e.g. Langfuse / OTel Collector down) from
     blocking or slowing down the primary RAG application execution.
     """
@@ -134,7 +135,7 @@ def get_telemetry_worker() -> TelemetryQueueWorker:
 
 class BaseExtension:
     """Base class for monitoring extensions.
-    
+
     Implement these lifecycle hooks to intercept and monitor queries, steps,
     and model generations.
     """
@@ -154,7 +155,7 @@ class BaseExtension:
         """Called when a query execution completes successfully."""
         pass
 
-    def on_query_error(self, exc: Exception) -> None:
+    def on_query_error(self, exc: Exception, trace_id: str | None = None) -> None:
         """Called when a query execution raises an exception."""
         pass
 
@@ -177,7 +178,7 @@ class BaseExtension:
         """Called when a sub-step completes successfully."""
         pass
 
-    def on_step_error(self, step_name: str, exc: Exception) -> None:
+    def on_step_error(self, step_name: str, exc: Exception, trace_id: str | None = None) -> None:
         """Called when a sub-step raises an exception."""
         pass
 
@@ -251,7 +252,7 @@ class LangfuseTracingExtension(BaseExtension):
     def _execute(self, fn: Any, *args: Any, **kwargs: Any) -> None:
         if not self._cb.allow_request():
             return
-        
+
         def run_task():
             try:
                 fn(*args, **kwargs)
@@ -296,7 +297,7 @@ class LangfuseTracingExtension(BaseExtension):
 
         self._execute(task)
 
-    def on_query_error(self, exc: Exception) -> None:
+    def on_query_error(self, exc: Exception, trace_id: str | None = None) -> None:
         if not hasattr(self, "_span") or not hasattr(self, "_ctx"):
             return
 
@@ -347,7 +348,7 @@ class LangfuseTracingExtension(BaseExtension):
 
         self._execute(task)
 
-    def on_step_error(self, step_name: str, exc: Exception) -> None:
+    def on_step_error(self, step_name: str, exc: Exception, trace_id: str | None = None) -> None:
         ctx = self._step_contexts.pop(step_name, None)
         self._step_spans.pop(step_name, None)
         if not ctx:
@@ -456,8 +457,8 @@ class OTelMetricsExtension(BaseExtension):
         )
         self._execute(self.metrics.record_cost, cost)
 
-    def on_query_error(self, exc: Exception) -> None:
-        self._execute(self.metrics.record_error, "query", type(exc).__name__)
+    def on_query_error(self, exc: Exception, trace_id: str | None = None) -> None:
+        self._execute(self.metrics.record_error, "query", type(exc).__name__, trace_id=trace_id)
 
     def on_first_token(self, ttft: float) -> None:
         if self.metrics.enabled:
@@ -495,24 +496,35 @@ class OTelMetricsExtension(BaseExtension):
     ) -> None:
         self._execute(self.metrics.record_latency, step_name, elapsed)
 
-    def on_step_error(self, step_name: str, exc: Exception) -> None:
-        self._execute(self.metrics.record_error, step_name, type(exc).__name__)
+    def on_step_error(self, step_name: str, exc: Exception, trace_id: str | None = None) -> None:
+        self._execute(self.metrics.record_error, step_name, type(exc).__name__, trace_id=trace_id)
 
 
 class GuardrailExtension(BaseExtension):
-    """Custom pluggable extension validating content for real-time safety.
-    
-    If output toxicity or length violations are detected, raises a ValueError
-    to block the query response instantly.
+    """Basic keyword-based content filter, not a content-safety model.
+
+    Blocks a query/response when it contains one of `blocked_keywords` as a
+    whole word, case-insensitively (Unicode-aware via `re.UNICODE`). This
+    catches accidental/careless leaks of configured terms; it is not a
+    substitute for a real PII/toxicity classifier and can be bypassed by
+    anyone motivated to obfuscate the term (synonyms, character insertion,
+    homoglyphs). Pair with a dedicated content-safety model for anything
+    beyond basic keyword hygiene.
     """
 
     def __init__(self, max_length: int = 5000, blocked_keywords: list[str] | None = None) -> None:
+        import re
+
         self.max_length = max_length
         self.blocked_keywords = blocked_keywords or ["restricted_secret_api_key", "internal_confidential"]
+        self._patterns = [
+            re.compile(rf"(?<!\w){re.escape(kw)}(?!\w)", re.IGNORECASE | re.UNICODE)
+            for kw in self.blocked_keywords
+        ]
 
     def on_query_start(self, question: str, metadata: dict[str, Any]) -> None:
-        for keyword in self.blocked_keywords:
-            if keyword in question:
+        for keyword, pattern in zip(self.blocked_keywords, self._patterns, strict=True):
+            if pattern.search(question):
                 raise ValueError(f"Query contains blocked keyword: {keyword}")
 
     def on_query_end(
@@ -525,6 +537,61 @@ class GuardrailExtension(BaseExtension):
     ) -> None:
         if len(answer) > self.max_length:
             raise ValueError("Response length exceeds guardrail configuration limit")
-        for keyword in self.blocked_keywords:
-            if keyword in answer:
+        for pattern in self._patterns:
+            if pattern.search(answer):
                 raise ValueError("Response blocked by real-time output policy (contains restricted keywords)")
+
+
+class CostBudgetExtension(BaseExtension):
+    """Alerts when per-query or cumulative daily LLM cost crosses a threshold.
+
+    This is an alerting extension, not a blocking one like GuardrailExtension:
+    by the time `on_query_end` fires, the LLM call already happened and was
+    already paid for, so raising here would only break the caller's request
+    without saving any money. Wire `on_budget_exceeded` to page/notify
+    whoever owns the budget instead.
+    """
+
+    def __init__(
+        self,
+        per_query_limit: float | None = None,
+        daily_limit: float | None = None,
+        on_budget_exceeded: Callable[[str, float, float], None] | None = None,
+    ) -> None:
+        self.per_query_limit = per_query_limit
+        self.daily_limit = daily_limit
+        self.on_budget_exceeded = on_budget_exceeded or self._default_alert
+        self._daily_cost = 0.0
+        self._daily_date: date | None = None
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _default_alert(scope: str, actual: float, limit: float) -> None:
+        logger.warning(
+            "Cost budget exceeded (%s): $%.6f > $%.6f limit", scope, actual, limit
+        )
+
+    def on_query_end(
+        self,
+        answer: str,
+        citations: list[Any],
+        elapsed: float,
+        tokens: dict[str, int],
+        cost: float,
+    ) -> None:
+        if self.per_query_limit is not None and cost > self.per_query_limit:
+            self.on_budget_exceeded("per_query", cost, self.per_query_limit)
+
+        if self.daily_limit is None:
+            return
+
+        with self._lock:
+            today = date.today()
+            if self._daily_date != today:
+                self._daily_date = today
+                self._daily_cost = 0.0
+            self._daily_cost += cost
+            daily_cost = self._daily_cost
+
+        if daily_cost > self.daily_limit:
+            self.on_budget_exceeded("daily", daily_cost, self.daily_limit)

@@ -1,6 +1,7 @@
 import pytest
 from monitoring.wrappers import MonitoredRAGPipeline
 from monitoring.tracing import Tracer
+from monitoring.extensions import BaseExtension
 
 
 @pytest.fixture
@@ -64,7 +65,170 @@ def test_monitored_pipeline_records_error_on_query_failure(mock_pipeline, mocker
     mock_pipeline.query.side_effect = RuntimeError("fail")
     with pytest.raises(RuntimeError):
         monitored.query("What is RAG?")
-    metrics.record_error.assert_called_once_with("query", "RuntimeError")
+    metrics.record_error.assert_called_once_with("query", "RuntimeError", trace_id=None)
+
+
+def test_current_trace_id_is_none_when_tracing_disabled(mock_pipeline):
+    tracer = Tracer(enabled=False)
+    monitored = MonitoredRAGPipeline(pipeline=mock_pipeline, tracer=tracer)
+    assert monitored._current_trace_id() is None
+
+
+def test_current_trace_id_returns_active_trace_when_enabled(mock_pipeline):
+    tracer = Tracer(enabled=True)
+    monitored = MonitoredRAGPipeline(pipeline=mock_pipeline, tracer=tracer)
+    trace_id = monitored._current_trace_id()
+    assert isinstance(trace_id, str)
+    assert trace_id != ""
+
+
+class _DummyStreamGenerator:
+    """Generator stub without generate_stream, forcing dynamic injection."""
+
+    def __init__(self, provider="unknown", fail_generate=False):
+        self.provider = provider
+        self.model = "test-model"
+        self.temperature = 0.0
+        self.max_tokens = 128
+        self._fail_generate = fail_generate
+
+    def generate(self, query, contexts, system_prompt=None):
+        if self._fail_generate:
+            raise RuntimeError("generate failed")
+        return "fallback answer here"
+
+
+def _dummy_pipeline_for_stream(mocker, generator):
+    pipeline = mocker.MagicMock()
+    pipeline.config = mocker.MagicMock()
+    pipeline.config.top_k_final = 2
+    pipeline.generator = generator
+    pipeline._retrieve.return_value = [{"id": "c1", "document": "context"}]
+    pipeline.citation_formatter.build_citations.return_value = ["cit1"]
+    return pipeline
+
+
+def test_query_stream_fallback_provider_simulates_stream(mocker):
+    generator = _DummyStreamGenerator(provider="unknown")
+    pipeline = _dummy_pipeline_for_stream(mocker, generator)
+    mock_ext = mocker.MagicMock(spec=BaseExtension)
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[mock_ext])
+
+    chunks = list(monitored.query_stream("test query"))
+
+    assert "".join(chunks).strip() == "fallback answer here"
+    mock_ext.on_first_token.assert_called_once()
+    mock_ext.on_query_end.assert_called_once()
+
+
+def test_query_stream_fallback_provider_generate_failure_still_yields(mocker):
+    generator = _DummyStreamGenerator(provider="unknown", fail_generate=True)
+    pipeline = _dummy_pipeline_for_stream(mocker, generator)
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[])
+
+    chunks = list(monitored.query_stream("test query"))
+
+    assert "".join(chunks).strip() == "Fallback generated output stream simulation."
+
+
+def test_query_stream_openai_provider_yields_deltas(mocker):
+    generator = _DummyStreamGenerator(provider="openai")
+    pipeline = _dummy_pipeline_for_stream(mocker, generator)
+
+    mock_chunk1 = mocker.MagicMock()
+    mock_chunk1.choices = [mocker.MagicMock(delta=mocker.MagicMock(content="Hello "))]
+    mock_chunk2 = mocker.MagicMock()
+    mock_chunk2.choices = [mocker.MagicMock(delta=mocker.MagicMock(content="world"))]
+    mock_client = mocker.MagicMock()
+    mock_client.chat.completions.create.return_value = [mock_chunk1, mock_chunk2]
+    mocker.patch("openai.OpenAI", return_value=mock_client)
+
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[])
+    chunks = list(monitored.query_stream("test query"))
+
+    assert "".join(chunks) == "Hello world"
+
+
+def test_query_stream_anthropic_provider_yields_text(mocker):
+    generator = _DummyStreamGenerator(provider="anthropic")
+    pipeline = _dummy_pipeline_for_stream(mocker, generator)
+
+    mock_stream_ctx = mocker.MagicMock()
+    mock_stream_ctx.__enter__.return_value.text_stream = iter(["Hi ", "there"])
+    mock_stream_ctx.__exit__.return_value = False
+    mock_client = mocker.MagicMock()
+    mock_client.messages.stream.return_value = mock_stream_ctx
+    mocker.patch("anthropic.Anthropic", return_value=mock_client)
+
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[])
+    chunks = list(monitored.query_stream("test query"))
+
+    assert "".join(chunks) == "Hi there"
+
+
+def test_query_stream_count_tokens_falls_back_when_tiktoken_fails(mocker):
+    mocker.patch("tiktoken.encoding_for_model", side_effect=RuntimeError("offline"))
+    generator = _DummyStreamGenerator(provider="unknown")
+    pipeline = _dummy_pipeline_for_stream(mocker, generator)
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[])
+
+    list(monitored.query_stream("test query"))
+
+    assert monitored._last_query_tokens["prompt"] >= 1
+    assert monitored._last_query_tokens["completion"] >= 1
+
+
+def test_query_stream_propagates_retrieve_error(mocker):
+    generator = _DummyStreamGenerator(provider="unknown")
+    pipeline = _dummy_pipeline_for_stream(mocker, generator)
+    pipeline._retrieve.side_effect = RuntimeError("retrieve failed")
+    mock_ext = mocker.MagicMock(spec=BaseExtension)
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[mock_ext])
+
+    with pytest.raises(RuntimeError, match="retrieve failed"):
+        list(monitored.query_stream("test query"))
+
+    mock_ext.on_query_error.assert_called_once()
+
+
+def test_query_stream_propagates_generate_stream_setup_error(mocker):
+    generator = _DummyStreamGenerator(provider="unknown")
+    pipeline = _dummy_pipeline_for_stream(mocker, generator)
+    mock_ext = mocker.MagicMock(spec=BaseExtension)
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[mock_ext])
+
+    # Force the dynamic generate_stream binding itself to blow up.
+    mocker.patch.object(
+        type(pipeline.generator), "generate", side_effect=RuntimeError("unused"), create=True
+    )
+    mocker.patch(
+        "monitoring.wrappers._get_default_system_prompt", side_effect=RuntimeError("boom")
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        list(monitored.query_stream("test query"))
+
+    mock_ext.on_query_error.assert_called_once()
+
+
+def test_query_stream_iteration_error_runs_error_hooks(mocker):
+    class FailingStreamGenerator:
+        provider = "unknown"
+        model = "test-model"
+
+        def generate_stream(self, q, ctxs, sys_prompt=None):
+            yield "partial"
+            raise RuntimeError("stream broke")
+
+    pipeline = _dummy_pipeline_for_stream(mocker, FailingStreamGenerator())
+    mock_ext = mocker.MagicMock(spec=BaseExtension)
+    monitored = MonitoredRAGPipeline(pipeline, extensions=[mock_ext])
+
+    with pytest.raises(RuntimeError, match="stream broke"):
+        list(monitored.query_stream("test query"))
+
+    mock_ext.on_step_error.assert_called_once()
+    mock_ext.on_query_error.assert_called_once()
 
 
 def test_monitored_pipeline_metrics_noop_when_not_provided(mock_pipeline):

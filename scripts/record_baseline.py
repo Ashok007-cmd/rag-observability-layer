@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import json
 import logging
+import os
 import sys
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +60,7 @@ def record_baseline(
         return str(baseline_path)
 
     entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "prompt_hash": prompt_hash,
         **asdict(metrics),
     }
@@ -111,10 +111,16 @@ def main() -> None:
         return parent_dir / "production-grade-rag"
 
     project1_dir = get_project1_dir()
-    
+
     # Try looking in current working directory first, then fallback to project1_dir
-    eval_path = Path(args.eval_summary) if args.eval_summary else (Path("eval-summary.json") if Path("eval-summary.json").exists() else project1_dir / "eval-summary.json")
-    mon_path = Path(args.monitoring_summary) if args.monitoring_summary else (Path("monitoring-summary.json") if Path("monitoring-summary.json").exists() else project1_dir / "monitoring-summary.json")
+    default_eval_path = Path("eval-summary.json")
+    eval_path = Path(args.eval_summary) if args.eval_summary else (
+        default_eval_path if default_eval_path.exists() else project1_dir / "eval-summary.json"
+    )
+    default_mon_path = Path("monitoring-summary.json")
+    mon_path = Path(args.monitoring_summary) if args.monitoring_summary else (
+        default_mon_path if default_mon_path.exists() else project1_dir / "monitoring-summary.json"
+    )
 
     # If summaries do not exist, run evaluate.py
     if not eval_path.exists() or not mon_path.exists():
@@ -173,7 +179,7 @@ def main() -> None:
             prompts_data = json.load(f)
         versions = prompts_data.get("default_system_prompt", [])
         if not versions:
-            for k, v in prompts_data.items():
+            for _k, v in prompts_data.items():
                 if v:
                     versions = v
                     break

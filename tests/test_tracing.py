@@ -96,6 +96,79 @@ def test_tracer_trace_id_resets_after_root_span():
     assert first_id != second_id
 
 
+def test_tracer_active_spans_setter():
+    tracer = Tracer(enabled=False)
+    tracer._active_spans = ["dummy"]
+    assert tracer._active_spans == ["dummy"]
+
+
+def test_tracer_init_langfuse_success(mocker):
+    from monitoring.config import settings
+    mocker.patch.object(settings, "langfuse_secret_key", "sk-lf-test")
+    mock_client = mocker.MagicMock()
+    mocker.patch("langfuse.Langfuse", return_value=mock_client)
+
+    tracer = Tracer(enabled=True)
+
+    assert tracer.enabled
+    assert tracer._langfuse is mock_client
+
+
+def test_tracer_init_langfuse_import_error(mocker):
+    from monitoring.config import settings
+    mocker.patch.object(settings, "langfuse_secret_key", "sk-lf-test")
+    mocker.patch.dict("sys.modules", {"langfuse": None})
+
+    tracer = Tracer(enabled=True)
+
+    assert tracer.enabled is False
+    assert tracer._langfuse is None
+
+
+def test_tracer_trace_step_with_langfuse_enabled(mocker):
+    from monitoring.config import settings
+    mocker.patch.object(settings, "langfuse_secret_key", "sk-lf-test")
+
+    mock_root_span = mocker.MagicMock()
+    mock_sub_span = mocker.MagicMock()
+    mock_root_span.span.return_value = mock_sub_span
+    mock_client = mocker.MagicMock()
+    mock_client.trace.return_value = mock_root_span
+    mocker.patch("langfuse.Langfuse", return_value=mock_client)
+
+    tracer = Tracer(enabled=True)
+
+    with tracer.trace_step("query", input={"q": "hi"}) as root:
+        assert root is mock_root_span
+        with tracer.trace_step("retrieve", input={}) as sub:
+            assert sub is mock_sub_span
+
+    mock_client.trace.assert_called_once()
+    mock_root_span.span.assert_called_once()
+    assert mock_sub_span.end.called or mock_sub_span.update.called
+    assert mock_root_span.end.called or mock_root_span.update.called
+    # trace id resets once the root span exits
+    assert tracer._trace_id == ""
+
+
+def test_tracer_trace_step_langfuse_exception_calls_observation(mocker):
+    from monitoring.config import settings
+    mocker.patch.object(settings, "langfuse_secret_key", "sk-lf-test")
+
+    mock_span = mocker.MagicMock()
+    mock_client = mocker.MagicMock()
+    mock_client.trace.return_value = mock_span
+    mocker.patch("langfuse.Langfuse", return_value=mock_client)
+
+    tracer = Tracer(enabled=True)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with tracer.trace_step("query"):
+            raise RuntimeError("boom")
+
+    mock_span.observation.assert_called_once()
+
+
 def test_pricing_config_anthropic_new_models():
     pricing = PricingConfig(pricing_path="pricing.json")
     cost = pricing.get_cost("anthropic", "claude-sonnet-4-6", 1000, 500)

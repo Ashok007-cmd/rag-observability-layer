@@ -12,4 +12,8 @@ COPY pricing.json .env.example ./
 ENV MONITOR_ENABLED=true
 ENV PYTHONUNBUFFERED=1
 
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+USER appuser
+
 CMD ["python", "scripts/demo_observability.py"]

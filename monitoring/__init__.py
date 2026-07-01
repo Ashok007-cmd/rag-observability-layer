@@ -1,15 +1,16 @@
-from .config import settings, PricingConfig
-from .tracing import Tracer
-from .metrics import MetricsCollector
-from .prompts import PromptRegistry
-from .wrappers import MonitoredRAGPipeline
+from .config import PricingConfig, settings
 from .extensions import (
     BaseExtension,
+    CircuitBreaker,
+    CostBudgetExtension,
+    GuardrailExtension,
     LangfuseTracingExtension,
     OTelMetricsExtension,
-    GuardrailExtension,
-    CircuitBreaker,
 )
+from .metrics import MetricsCollector
+from .prompts import PromptRegistry
+from .tracing import Tracer
+from .wrappers import MonitoredRAGPipeline
 
 __all__ = [
     "settings",
@@ -22,6 +23,7 @@ __all__ = [
     "LangfuseTracingExtension",
     "OTelMetricsExtension",
     "GuardrailExtension",
+    "CostBudgetExtension",
     "CircuitBreaker",
 ]
 

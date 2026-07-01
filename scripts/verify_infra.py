@@ -4,11 +4,10 @@
 Checks PostgreSQL, Langfuse, Prometheus, and Grafana status before running pipelines.
 """
 
-import sys
 import socket
-import urllib.request
+import sys
 import urllib.error
-import time
+import urllib.request
 
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -20,7 +19,7 @@ def check_port(host: str, port: int, timeout: float = 2.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
-    except (socket.timeout, ConnectionRefusedError):
+    except (TimeoutError, ConnectionRefusedError):
         return False
 
 

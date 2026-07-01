@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import uuid
 import logging
 import threading
+import uuid
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Generator
+from typing import Any
 
-from .config import settings, PricingConfig
+from .config import PricingConfig, settings
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,7 @@ class Tracer:
             raise
         finally:
             self._active_spans.pop()
-            
+
             output_val = getattr(current, "_output", {})
             if not output_val and hasattr(current, "output"):
                 output_val = current.output

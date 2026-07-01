@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-import logging
 from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +43,12 @@ class MonitoringSettings(BaseSettings):
             return ""
         stripped = v.strip()
         if stripped and not (stripped.startswith("sk-lf-") or stripped.startswith("pk-lf-")):
-            logging.getLogger(__name__).warning(
-                "Monitoring key '%s...' format may be incorrect (expected sk-lf- or pk-lf- prefix)",
+            logging.getLogger(__name__).error(
+                "Rejecting monitoring key '%s...': expected sk-lf- or pk-lf- prefix. "
+                "Tracing will be disabled until a valid Langfuse key is configured.",
                 stripped[:8],
             )
+            return ""
         return stripped
 
 
@@ -60,7 +60,7 @@ class PricingConfig:
         self.path = Path(pricing_path)
         if not self.path.exists():
             self.path = Path(__file__).parent.parent / pricing_path
-        
+
         self.abs_path = str(self.path.resolve())
         self._last_loaded = 0.0
         self._data: dict[str, Any] = {}
@@ -95,7 +95,10 @@ class PricingConfig:
         if not model_data:
             import re
             for key, val in provider_data.items():
-                pattern = key.replace("*", ".*")
+                pattern = "".join(
+                    ".*" if part == "*" else re.escape(part)
+                    for part in re.split(r"(\*)", key)
+                )
                 if re.match(f"^{pattern}$", model) or key in model:
                     model_data = val
                     break
